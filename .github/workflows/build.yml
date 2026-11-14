@@ -4,8 +4,7 @@ name: Build StockfishLab APK
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - "*.zip"
       - ".github/workflows/build.yml"
@@ -18,86 +17,83 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Install Android SDK packages
+      - name: Find and extract ZIP
         shell: bash
         run: |
           set -euo pipefail
-
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-
-          if [ -z "$SDK_ROOT" ]; then
-            echo "::error::Android SDK tidak ditemukan"
-            exit 1
-          fi
-
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager tidak ditemukan"
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses || true
-
-          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-      - name: Find and extract project ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-
           ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "::error::File ZIP project tidak ditemukan di root repository"
-            exit 1
-          fi
-
+          test -n "$ZIP_FILE" || { echo "ZIP project tidak ditemukan"; exit 1; }
           mkdir -p source
           unzip -q "$ZIP_FILE" -d source
 
-          echo "ZIP ditemukan: $ZIP_FILE"
-          find source -maxdepth 4 -type f | head -100
-
-      - name: Locate Android Gradle project
-        shell: bash
-        run: |
-          set -euo pipefail
-
           GRADLEW="$(find source -type f -name gradlew -print -quit)"
-
-          if [ -z "$GRADLEW" ]; then
-            echo "::error::gradlew tidak ditemukan. ZIP harus berisi project Android lengkap."
-            exit 1
-          fi
+          test -n "$GRADLEW" || { echo "gradlew tidak ditemukan"; exit 1; }
 
           PROJECT_DIR="$(dirname "$GRADLEW")"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           chmod +x "$GRADLEW"
 
-      - name: Build debug APK
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Prepare JavaScript and Stockfish
         shell: bash
         run: |
           set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          npm install --no-save esbuild@0.25.0 chess.js@1.4.0 stockfish@19.0.1
+
+          mkdir -p app/src/main/assets/engine
+
+          # Bundle chess.js and the interactive board code.
+          sed -i "s|from './vendor/chess.js'|from 'chess.js'|" \
+            app/src/main/assets/main-entry.js
+
+          ./node_modules/.bin/esbuild \
+            app/src/main/assets/main-entry.js \
+            --bundle \
+            --platform=browser \
+            --format=iife \
+            --outfile=app/src/main/assets/main.js
+
+          # Copy matching Stockfish JS and WASM files.
+          ENGINE_JS="$(find node_modules/stockfish -type f \
+            -name 'stockfish-19-lite-single.js' -print -quit)"
+          ENGINE_WASM="$(find node_modules/stockfish -type f \
+            -name 'stockfish-19-lite-single.wasm' -print -quit)"
+
+          test -n "$ENGINE_JS" || { echo "Stockfish JS tidak ditemukan"; exit 1; }
+          test -n "$ENGINE_WASM" || { echo "Stockfish WASM tidak ditemukan"; exit 1; }
+
+          cp "$ENGINE_JS" app/src/main/assets/engine/
+          cp "$ENGINE_WASM" app/src/main/assets/engine/
+
+          echo "Pemeriksaan aset:"
+          ls -lh app/src/main/assets/main.js
+          ls -lh app/src/main/assets/engine/
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          chmod +x gradlew
           ./gradlew --no-daemon --stacktrace assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: StockfishLab-APK
-          path: ${{ env.PROJECT_DIR }}/**/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
