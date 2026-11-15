@@ -1,10 +1,11 @@
 
-name: Build StockfishLab APK
+name: Build StockfishLab V3 Floating APK
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "*.zip"
       - ".github/workflows/build.yml"
@@ -17,32 +18,46 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Find and extract ZIP
+      - name: Extract V3 project
         shell: bash
         run: |
           set -euo pipefail
+
           ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
-          test -n "$ZIP_FILE" || { echo "ZIP project tidak ditemukan"; exit 1; }
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "::error::ZIP project tidak ditemukan"
+            exit 1
+          fi
+
           mkdir -p source
           unzip -q "$ZIP_FILE" -d source
 
           GRADLEW="$(find source -type f -name gradlew -print -quit)"
-          test -n "$GRADLEW" || { echo "gradlew tidak ditemukan"; exit 1; }
+
+          if [ -z "$GRADLEW" ]; then
+            echo "::error::gradlew tidak ditemukan"
+            exit 1
+          fi
 
           PROJECT_DIR="$(dirname "$GRADLEW")"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
           chmod +x "$GRADLEW"
 
-      - name: Prepare JavaScript and Stockfish
+          echo "Project: $PROJECT_DIR"
+
+      - name: Install JavaScript dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -50,50 +65,80 @@ jobs:
 
           npm install --no-save esbuild@0.25.0 chess.js@1.4.0 stockfish@19.0.1
 
-          mkdir -p app/src/main/assets/engine
+      - name: Build JavaScript assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
 
-          # Bundle chess.js and the interactive board code.
+          ASSETS="app/src/main/assets"
+
+          mkdir -p "$ASSETS/engine"
+
+          if [ ! -f "$ASSETS/main-entry.js" ]; then
+            echo "::error::main-entry.js tidak ditemukan"
+            exit 1
+          fi
+
           sed -i "s|from './vendor/chess.js'|from 'chess.js'|" \
-            app/src/main/assets/main-entry.js
+            "$ASSETS/main-entry.js"
 
           ./node_modules/.bin/esbuild \
-            app/src/main/assets/main-entry.js \
+            "$ASSETS/main-entry.js" \
             --bundle \
             --platform=browser \
             --format=iife \
-            --outfile=app/src/main/assets/main.js
+            --outfile="$ASSETS/main.js"
 
-          # Copy matching Stockfish JS and WASM files.
           ENGINE_JS="$(find node_modules/stockfish -type f \
             -name 'stockfish-19-lite-single.js' -print -quit)"
+
           ENGINE_WASM="$(find node_modules/stockfish -type f \
             -name 'stockfish-19-lite-single.wasm' -print -quit)"
 
-          test -n "$ENGINE_JS" || { echo "Stockfish JS tidak ditemukan"; exit 1; }
-          test -n "$ENGINE_WASM" || { echo "Stockfish WASM tidak ditemukan"; exit 1; }
+          if [ -z "$ENGINE_JS" ] || [ -z "$ENGINE_WASM" ]; then
+            echo "::error::File Stockfish JS atau WASM tidak ditemukan"
+            exit 1
+          fi
 
-          cp "$ENGINE_JS" app/src/main/assets/engine/
-          cp "$ENGINE_WASM" app/src/main/assets/engine/
+          cp "$ENGINE_JS" "$ASSETS/engine/"
+          cp "$ENGINE_WASM" "$ASSETS/engine/"
 
           echo "Pemeriksaan aset:"
-          ls -lh app/src/main/assets/main.js
-          ls -lh app/src/main/assets/engine/
+          ls -lh "$ASSETS/main.js"
+          ls -lh "$ASSETS/engine/"
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: platform-tools platforms;android-35 build-tools;35.0.0
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
 
-      - name: Build APK
+      - name: Build Android APK
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
-          chmod +x gradlew
+          set -euo pipefail
           ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk/debug" \
+            -type f -name '*.apk' -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "::error::APK tidak berhasil dibuat"
+            exit 1
+          fi
+
+          ls -lh "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: StockfishLab-APK
+          name: StockfishLab-V3-Floating-APK
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
