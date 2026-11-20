@@ -20,11 +20,13 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # Runner GitHub sudah punya Android SDK (ANDROID_HOME), jadi cukup terima lisensi + pasang paket
       - name: Install Android SDK packages
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
 
       # Project tidak punya gradlew, jadi Gradle dipasang langsung (AGP 8.7.3 butuh Gradle >= 8.9)
       - name: Set up Gradle
