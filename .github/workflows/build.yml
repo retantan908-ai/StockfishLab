@@ -1,20 +1,15 @@
-name: apk shin
+name: Build APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main, master]
-    paths:
-      - "*.zip"
-      - "stockfish_lab_android/**"
-      - ".github/workflows/build.yml"
-
-permissions:
-  contents: read
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,62 +18,46 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      - name: Locate or Extract Android project
-        shell: bash
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      # Project tidak punya gradlew, jadi Gradle dipasang langsung (AGP 8.7.3 butuh Gradle >= 8.9)
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      # Mendukung 2 kondisi: ZIP project di root repo, atau folder android/ sudah di-commit
+      - name: Locate or extract Android project
         run: |
           set -euo pipefail
-          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*StockfishLab*.zip' -o -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
           if [ -n "$ZIP_FILE" ]; then
             echo "Found ZIP: $ZIP_FILE"
             mkdir -p source
             unzip -q "$ZIP_FILE" -d source
-            GRADLEW="$(find source -type f -name gradlew -print -quit)"
+            SETTINGS="$(find source -type f -name 'settings.gradle*' -not -path '*/node_modules/*' -print -quit)"
           else
-            echo "No ZIP in root, searching extracted project folder..."
-            GRADLEW="$(find . -maxdepth 3 -type f -name gradlew -print -quit)"
+            echo "No ZIP in root, searching repository..."
+            SETTINGS="$(find . -maxdepth 4 -type f -name 'settings.gradle*' -print -quit)"
           fi
-          test -n "$GRADLEW" || { echo "gradlew missing from repository or ZIP"; exit 1; }
-          PROJECT_DIR="$(dirname "$GRADLEW")"
+          test -n "$SETTINGS" || { echo "settings.gradle(.kts) tidak ditemukan"; exit 1; }
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+          echo "PROJECT_DIR=$PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          chmod +x "$GRADLEW"
 
-      - name: Install web dependencies and bundle app
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          npm install --no-save esbuild@0.25.0 chess.js@1.4.0 stockfish@19.0.1
-          mkdir -p app/src/main/assets/engine
-          sed -i "s|from './vendor/chess.js'|from 'chess.js'|" app/src/main/assets/main-entry.js
-          ./node_modules/.bin/esbuild app/src/main/assets/main-entry.js --bundle --platform=browser --format=iife --outfile=app/src/main/assets/main.js
-          ENGINE_JS="$(find node_modules/stockfish -type f -name 'stockfish-19-lite-single.js' -print -quit)"
-          ENGINE_WASM="$(find node_modules/stockfish -type f -name 'stockfish-19-lite-single.wasm' -print -quit)"
-          test -n "$ENGINE_JS" || { echo "Stockfish JS asset missing"; exit 1; }
-          test -n "$ENGINE_WASM" || { echo "Stockfish WASM asset missing"; exit 1; }
-          cp "$ENGINE_JS" app/src/main/assets/engine/
-          cp "$ENGINE_WASM" app/src/main/assets/engine/
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools platforms;android-35 build-tools;35.0.0
-
-      - name: Build Debug APK
+      - name: Build debug APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: ./gradlew --no-daemon --stacktrace assembleDebug
-
-      - name: Rename and Upload APK Artifact
-        shell: bash
-        run: |
-          mkdir -p release_apk
-          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" release_apk/StockfishLab-V3-LiquidGlass.apk
+        run: gradle assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: StockfishLab-V3-LiquidGlass-APK
-          path: release_apk/StockfishLab-V3-LiquidGlass.apk
+          name: shin-study-assistant-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 30
